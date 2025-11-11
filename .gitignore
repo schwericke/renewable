@@ -1,0 +1,9 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Environment variables
+.env
+
+# Data cache
+cache_*.json
