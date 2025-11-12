@@ -7,3 +7,7 @@ __pycache__/
 
 # Data cache
 cache_*.json
+yearly_avg.json
+
+# Debug files
+debug_*.xml
