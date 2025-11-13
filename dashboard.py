@@ -435,25 +435,16 @@ with button_right:
 
                 finalized_renewable += new_renewable
 
-                # Fetch newly finalized consumption (SMARD)
-                index_url = "https://www.smard.de/app/chart_data/410/DE/index_hour.json"
-                all_timestamps = requests.get(index_url, timeout=30).json()["timestamps"]
-
+                # Fetch newly finalized consumption (SMARD) - single request
                 start_ms = int(datetime.strptime(fetch_start, "%Y%m%d").timestamp() * 1000)
                 cutoff_ms = int(cutoff.timestamp() * 1000)
-
-                for ts in all_timestamps:
-                    if datetime.fromtimestamp(ts/1000).year != current_year:
-                        continue
-                    block_end = ts + (7 * 24 * 3600 * 1000)
-                    if ts > cutoff_ms or block_end < start_ms:
-                        continue
-
-                    url = f"https://www.smard.de/app/chart_data/410/DE/410_DE_hour_{ts}.json"
-                    data = requests.get(url, timeout=30).json()["series"]
-                    for timestamp, value in data:
-                        if start_ms <= timestamp < cutoff_ms and value:
-                            finalized_consumption += value
+                
+                url = f"https://www.smard.de/app/chart_data/410.json?start={start_ms}&end={cutoff_ms}"
+                smard_data = requests.get(url, timeout=60).json()
+                
+                for timestamp, value in smard_data.get("series", []):
+                    if value:
+                        finalized_consumption += value
 
                 # Fetch last 13 days (rolling window, day after cutoff to today)
                 recent_start = cutoff + timedelta(days=1)
@@ -476,12 +467,12 @@ with button_right:
                                 recent_renewable += float(point.find("ns:quantity", namespace).text) * 0.25
 
                 # SMARD consumption for last 13 days
-                latest_ts = requests.get(index_url, timeout=30).json()["timestamps"][-1]
-                url = f"https://www.smard.de/app/chart_data/410/DE/410_DE_hour_{latest_ts}.json"
-                data = requests.get(url, timeout=30).json()["series"]
-
                 recent_start_ms = int(recent_start.timestamp() * 1000)
-                recent_consumption = sum([v for t, v in data if t >= recent_start_ms and v])
+                today_ms = int(today.timestamp() * 1000)
+                
+                url = f"https://www.smard.de/app/chart_data/410.json?start={recent_start_ms}&end={today_ms}"
+                recent_data = requests.get(url, timeout=30).json()
+                recent_consumption = sum([v for t, v in recent_data.get("series", []) if v])
 
                 # Calculate new average
                 total_renewable = finalized_renewable + recent_renewable
