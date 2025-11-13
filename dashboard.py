@@ -6,7 +6,6 @@ Real-time view of renewable electricity in Germany
 import streamlit as st
 import os
 import requests
-import json
 import time
 import xml.etree.ElementTree as ET
 import holidays
@@ -226,16 +225,10 @@ is_holiday = today.date() in berlin_holidays
 # Compare to yearly averages
 # =============================================================================
 
-YEARLY_AVG_FILE = "yearly_avg.json"
 current_year = today.year
 
-# Load this year's average
-if os.path.exists(YEARLY_AVG_FILE):
-    with open(YEARLY_AVG_FILE) as f:
-        data = json.load(f)
-        yearly_renewable_avg = data["renewable_share"] if data.get("year") == current_year else 57.4
-else:
-    yearly_renewable_avg = 57.4
+# Hardcoded 2025 average
+yearly_renewable_avg = 61
 
 # Typical German weather
 yearly_sun_avg = 4.7    # hours per day
@@ -341,7 +334,7 @@ with labels_area:
         <span style="position: absolute; left: 6%; transform: translateX(-50%); text-align: center;"><b>6%</b><br>2000</span>
         <span style="position: absolute; left: 20%; transform: translateX(-50%); text-align: center;"><b>20%</b><br>2010</span>
         <span style="position: absolute; left: 50%; transform: translateX(-50%); text-align: center;"><b>50%</b><br>2020</span>
-        <span style="position: absolute; left: {this_year_avg}%; transform: translateX(-50%); text-align: center;"><b>{this_year_avg:.1f}%</b><br>{current_year}<br><b style="font-size: 36px; color: #00674F;">⬆</b></span>
+        <span style="position: absolute; left: {this_year_avg}%; transform: translateX(-50%); text-align: center;"><b>{int(this_year_avg)}%</b><br>{current_year}<br><b style="font-size: 36px; color: #00674F;">⬆</b></span>
         <span style="position: absolute; left: {label_pos}%; transform: translateX(-50%); text-align: center; color: #EFCF50;">{years_left} years to reach target</span>
         <span style="position: absolute; left: 80%; transform: translateX(-50%); text-align: center;"><b>80%</b><br>2030<br><span style="color: #EFCF50;">EEG Target</span></span>
         <span style="position: absolute; right: 0%; transform: translateX(50%); text-align: center;"><b>100%</b></span>
@@ -372,134 +365,10 @@ with sources_center:
 
 with button_right:
     st.markdown('<div class="tiny-button">', unsafe_allow_html=True)
-    if st.button("🔄 Update", key="update_avg"):
-        with st.spinner("Updating..."):
-            try:
-                # Update yearly average using incremental caching
-                cutoff = today - timedelta(days=14)
-                cutoff_str = cutoff.strftime("%Y%m%d")
-
-                # Load cached finalized data
-                finalized_renewable = 0
-                finalized_consumption = 0
-                last_finalized = None
-                cached_avg = None
-
-                if os.path.exists(YEARLY_AVG_FILE):
-                    with open(YEARLY_AVG_FILE) as f:
-                        cache = json.load(f)
-                        if cache.get("year") == current_year and "finalized_date" in cache:
-                            finalized_renewable = cache.get("finalized_renewable_MWh", 0)
-                            finalized_consumption = cache.get("finalized_consumption_MWh", 0)
-                            last_finalized = cache["finalized_date"]
-                            cached_avg = cache.get("renewable_share")
-
-                # If nothing new to finalize, just reload
-                if last_finalized == cutoff_str and cached_avg:
-                    st.rerun()
-
-                # Determine what to fetch
-                if last_finalized is None:
-                    fetch_start = f"{current_year}0101"
-                else:
-                    next_day = datetime.strptime(last_finalized, "%Y%m%d") + timedelta(days=1)
-                    fetch_start = next_day.strftime("%Y%m%d")
-
-                # Fetch newly finalized generation (ENTSOE) - single request
-                api_key = os.getenv("ENTSOE_API_KEY")
-                namespace = {"ns": "urn:iec62325.351:tc57wg16:451-6:generationloaddocument:3:0"}
-                renewables = ["B01", "B09", "B11", "B12", "B15", "B16", "B17", "B18", "B19"]
-
-                params = {
-                    "securityToken": api_key,
-                    "documentType": "A75",
-                    "processType": "A16",
-                    "in_Domain": "10Y1001A1001A83F",
-                    "out_Domain": "10Y1001A1001A83F",
-                    "periodStart": f"{fetch_start}0000",
-                    "periodEnd": f"{cutoff_str}2359",
-                }
-
-                response = requests.get("https://web-api.tp.entsoe.eu/api", params=params, timeout=120)
-                response.raise_for_status()
-                xml_data = ET.fromstring(response.content)
-
-                new_renewable = 0
-                for series in xml_data.findall(".//ns:TimeSeries", namespace):
-                    energy_type = series.find(".//ns:psrType", namespace)
-                    if energy_type and energy_type.text in renewables:
-                        period = series.find(".//ns:Period", namespace)
-                        if period:
-                            for point in period.findall(".//ns:Point", namespace):
-                                new_renewable += float(point.find("ns:quantity", namespace).text) * 0.25
-
-                finalized_renewable += new_renewable
-
-                # Fetch newly finalized consumption (SMARD) - single request
-                start_ms = int(datetime.strptime(fetch_start, "%Y%m%d").timestamp() * 1000)
-                cutoff_ms = int(cutoff.timestamp() * 1000)
-                
-                url = f"https://www.smard.de/app/chart_data/410.json?start={start_ms}&end={cutoff_ms}"
-                smard_data = requests.get(url, timeout=60).json()
-                
-                for timestamp, value in smard_data.get("series", []):
-                    if value:
-                        finalized_consumption += value
-
-                # Fetch last 13 days (rolling window, day after cutoff to today)
-                recent_start = cutoff + timedelta(days=1)
-                recent_start_str = recent_start.strftime("%Y%m%d")
-
-                params["periodStart"] = f"{recent_start_str}0000"
-                params["periodEnd"] = today.strftime("%Y%m%d2359")
-
-                response = requests.get("https://web-api.tp.entsoe.eu/api", params=params, timeout=120)
-                response.raise_for_status()
-                xml_data = ET.fromstring(response.content)
-
-                recent_renewable = 0
-                for series in xml_data.findall(".//ns:TimeSeries", namespace):
-                    energy_type = series.find(".//ns:psrType", namespace)
-                    if energy_type and energy_type.text in renewables:
-                        period = series.find(".//ns:Period", namespace)
-                        if period:
-                            for point in period.findall(".//ns:Point", namespace):
-                                recent_renewable += float(point.find("ns:quantity", namespace).text) * 0.25
-
-                # SMARD consumption for last 13 days
-                recent_start_ms = int(recent_start.timestamp() * 1000)
-                today_ms = int(today.timestamp() * 1000)
-                
-                url = f"https://www.smard.de/app/chart_data/410.json?start={recent_start_ms}&end={today_ms}"
-                recent_data = requests.get(url, timeout=30).json()
-                recent_consumption = sum([v for t, v in recent_data.get("series", []) if v])
-
-                # Calculate new average
-                total_renewable = finalized_renewable + recent_renewable
-                total_consumption = finalized_consumption + recent_consumption
-                new_avg = (total_renewable / total_consumption * 100) if total_consumption > 0 else 0
-
-                # Don't save if the result is suspiciously low (API error likely)
-                if new_avg < 10:
-                    st.error("Update failed. Data incomplete.")
-                    st.stop()
-
-                # Save updated finalized data
-                with open(YEARLY_AVG_FILE, "w") as f:
-                    json.dump({
-                        "year": current_year,
-                        "renewable_share": new_avg,
-                        "finalized_date": cutoff_str,
-                        "finalized_renewable_MWh": finalized_renewable,
-                        "finalized_consumption_MWh": finalized_consumption
-                    }, f)
-
-                # Clear today's cache and reload
-                get_entsoe_data.clear()
-                get_smard_data.clear()
-                st.rerun()
-
-            except Exception as e:
-                st.error(f"Update failed: {str(e)}")
-                st.stop()
+    if st.button("🔄 Update", key="update_today"):
+        # Clear cache and force refresh of today's data
+        get_entsoe_data.clear()
+        get_smard_data.clear()
+        get_weather_data.clear()
+        st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)  # Close tiny-button div
