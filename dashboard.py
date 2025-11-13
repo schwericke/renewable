@@ -400,61 +400,46 @@ with button_right:
 
                 # Determine what to fetch
                 if last_finalized is None:
-                    fetch_start_date = datetime(current_year, 1, 1)
+                    fetch_start = f"{current_year}0101"
                 else:
-                    fetch_start_date = datetime.strptime(last_finalized, "%Y%m%d") + timedelta(days=1)
+                    next_day = datetime.strptime(last_finalized, "%Y%m%d") + timedelta(days=1)
+                    fetch_start = next_day.strftime("%Y%m%d")
 
-                # API setup
+                # Fetch newly finalized generation (ENTSOE) - single request
                 api_key = os.getenv("ENTSOE_API_KEY")
                 namespace = {"ns": "urn:iec62325.351:tc57wg16:451-6:generationloaddocument:3:0"}
                 renewables = ["B01", "B09", "B11", "B12", "B15", "B16", "B17", "B18", "B19"]
 
-                # Fetch ENTSOE in monthly chunks (much faster and more reliable)
-                current_date = fetch_start_date
-                while current_date <= cutoff:
-                    # Get month boundaries
-                    month_start = current_date
-                    if month_start.month == 12:
-                        month_end = datetime(month_start.year + 1, 1, 1) - timedelta(days=1)
-                    else:
-                        month_end = datetime(month_start.year, month_start.month + 1, 1) - timedelta(days=1)
-                    
-                    # Don't go past cutoff
-                    chunk_end = min(month_end, cutoff)
+                params = {
+                    "securityToken": api_key,
+                    "documentType": "A75",
+                    "processType": "A16",
+                    "in_Domain": "10Y1001A1001A83F",
+                    "out_Domain": "10Y1001A1001A83F",
+                    "periodStart": f"{fetch_start}0000",
+                    "periodEnd": f"{cutoff_str}2359",
+                }
 
-                    params = {
-                        "securityToken": api_key,
-                        "documentType": "A75",
-                        "processType": "A16",
-                        "in_Domain": "10Y1001A1001A83F",
-                        "out_Domain": "10Y1001A1001A83F",
-                        "periodStart": month_start.strftime("%Y%m%d") + "0000",
-                        "periodEnd": chunk_end.strftime("%Y%m%d") + "2359",
-                    }
+                response = requests.get("https://web-api.tp.entsoe.eu/api", params=params, timeout=120)
+                response.raise_for_status()
+                xml_data = ET.fromstring(response.content)
 
-                    response = requests.get("https://web-api.tp.entsoe.eu/api", params=params, timeout=60)
-                    response.raise_for_status()
-                    xml_data = ET.fromstring(response.content)
+                new_renewable = 0
+                for series in xml_data.findall(".//ns:TimeSeries", namespace):
+                    energy_type = series.find(".//ns:psrType", namespace)
+                    if energy_type and energy_type.text in renewables:
+                        period = series.find(".//ns:Period", namespace)
+                        if period:
+                            for point in period.findall(".//ns:Point", namespace):
+                                new_renewable += float(point.find("ns:quantity", namespace).text) * 0.25
 
-                    for series in xml_data.findall(".//ns:TimeSeries", namespace):
-                        energy_type = series.find(".//ns:psrType", namespace)
-                        if energy_type and energy_type.text in renewables:
-                            period = series.find(".//ns:Period", namespace)
-                            if period:
-                                for point in period.findall(".//ns:Point", namespace):
-                                    finalized_renewable += float(point.find("ns:quantity", namespace).text) * 0.25
+                finalized_renewable += new_renewable
 
-                    # Move to next month
-                    if month_start.month == 12:
-                        current_date = datetime(month_start.year + 1, 1, 1)
-                    else:
-                        current_date = datetime(month_start.year, month_start.month + 1, 1)
-
-                # Fetch SMARD consumption (all at once - it's fast)
+                # Fetch newly finalized consumption (SMARD)
                 index_url = "https://www.smard.de/app/chart_data/410/DE/index_hour.json"
                 all_timestamps = requests.get(index_url, timeout=30).json()["timestamps"]
 
-                start_ms = int(fetch_start_date.timestamp() * 1000)
+                start_ms = int(datetime.strptime(fetch_start, "%Y%m%d").timestamp() * 1000)
                 cutoff_ms = int(cutoff.timestamp() * 1000)
 
                 for ts in all_timestamps:
