@@ -374,133 +374,146 @@ with button_right:
     st.markdown('<div class="tiny-button">', unsafe_allow_html=True)
     if st.button("🔄 Update", key="update_avg"):
         with st.spinner("Updating..."):
-            # Update yearly average using incremental caching
-            cutoff = today - timedelta(days=14)
-            cutoff_str = cutoff.strftime("%Y%m%d")
+            try:
+                # Update yearly average using incremental caching
+                cutoff = today - timedelta(days=14)
+                cutoff_str = cutoff.strftime("%Y%m%d")
 
-            # Load cached finalized data
-            finalized_renewable = 0
-            finalized_consumption = 0
-            last_finalized = None
-            cached_avg = None
+                # Load cached finalized data
+                finalized_renewable = 0
+                finalized_consumption = 0
+                last_finalized = None
+                cached_avg = None
 
-            if os.path.exists(YEARLY_AVG_FILE):
-                with open(YEARLY_AVG_FILE) as f:
-                    cache = json.load(f)
-                    if cache.get("year") == current_year and "finalized_date" in cache:
-                        finalized_renewable = cache.get("finalized_renewable_MWh", 0)
-                        finalized_consumption = cache.get("finalized_consumption_MWh", 0)
-                        last_finalized = cache["finalized_date"]
-                        cached_avg = cache.get("renewable_share")
+                if os.path.exists(YEARLY_AVG_FILE):
+                    with open(YEARLY_AVG_FILE) as f:
+                        cache = json.load(f)
+                        if cache.get("year") == current_year and "finalized_date" in cache:
+                            finalized_renewable = cache.get("finalized_renewable_MWh", 0)
+                            finalized_consumption = cache.get("finalized_consumption_MWh", 0)
+                            last_finalized = cache["finalized_date"]
+                            cached_avg = cache.get("renewable_share")
 
-            # If nothing new to finalize, just reload
-            if last_finalized == cutoff_str and cached_avg:
-                st.rerun()
+                # If nothing new to finalize, just reload
+                if last_finalized == cutoff_str and cached_avg:
+                    st.rerun()
 
-            # Determine what to fetch
-            if last_finalized is None:
-                # First time: get everything from Jan 1 to cutoff
-                fetch_start = f"{current_year}0101"
-            else:
-                # Subsequent: only get days after last finalized (no double-counting)
-                next_day = datetime.strptime(last_finalized, "%Y%m%d") + timedelta(days=1)
-                fetch_start = next_day.strftime("%Y%m%d")
+                # Determine what to fetch
+                if last_finalized is None:
+                    # First time: get everything from Jan 1 to cutoff
+                    fetch_start = f"{current_year}0101"
+                else:
+                    # Subsequent: only get days after last finalized (no double-counting)
+                    next_day = datetime.strptime(last_finalized, "%Y%m%d") + timedelta(days=1)
+                    fetch_start = next_day.strftime("%Y%m%d")
 
-            # Fetch newly finalized generation (ENTSOE)
-            api_key = os.getenv("ENTSOE_API_KEY")
-            namespace = {"ns": "urn:iec62325.351:tc57wg16:451-6:generationloaddocument:3:0"}
-            renewables = ["B01", "B09", "B11", "B12", "B15", "B16", "B17", "B18", "B19"]
+                # Fetch newly finalized generation (ENTSOE)
+                api_key = os.getenv("ENTSOE_API_KEY")
+                namespace = {"ns": "urn:iec62325.351:tc57wg16:451-6:generationloaddocument:3:0"}
+                renewables = ["B01", "B09", "B11", "B12", "B15", "B16", "B17", "B18", "B19"]
 
-            params = {
-                "securityToken": api_key,
-                "documentType": "A75",
-                "processType": "A16",
-                "in_Domain": "10Y1001A1001A83F",
-                "out_Domain": "10Y1001A1001A83F",
-                "periodStart": f"{fetch_start}0000",
-                "periodEnd": f"{cutoff_str}2359",
-            }
+                params = {
+                    "securityToken": api_key,
+                    "documentType": "A75",
+                    "processType": "A16",
+                    "in_Domain": "10Y1001A1001A83F",
+                    "out_Domain": "10Y1001A1001A83F",
+                    "periodStart": f"{fetch_start}0000",
+                    "periodEnd": f"{cutoff_str}2359",
+                }
 
-            response = requests.get("https://web-api.tp.entsoe.eu/api", params=params, timeout=120)
-            response.raise_for_status()
-            xml_data = ET.fromstring(response.content)
+                response = requests.get("https://web-api.tp.entsoe.eu/api", params=params, timeout=120)
+                response.raise_for_status()
+                xml_data = ET.fromstring(response.content)
 
-            new_renewable = 0
-            for series in xml_data.findall(".//ns:TimeSeries", namespace):
-                energy_type = series.find(".//ns:psrType", namespace)
-                if energy_type and energy_type.text in renewables:
-                    period = series.find(".//ns:Period", namespace)
-                    if period:
-                        for point in period.findall(".//ns:Point", namespace):
-                            new_renewable += float(point.find("ns:quantity", namespace).text) * 0.25
+                new_renewable = 0
+                for series in xml_data.findall(".//ns:TimeSeries", namespace):
+                    energy_type = series.find(".//ns:psrType", namespace)
+                    if energy_type and energy_type.text in renewables:
+                        period = series.find(".//ns:Period", namespace)
+                        if period:
+                            for point in period.findall(".//ns:Point", namespace):
+                                new_renewable += float(point.find("ns:quantity", namespace).text) * 0.25
 
-            finalized_renewable += new_renewable
+                finalized_renewable += new_renewable
 
-            # Fetch newly finalized consumption (SMARD)
-            index_url = "https://www.smard.de/app/chart_data/410/DE/index_hour.json"
-            all_timestamps = requests.get(index_url, timeout=30).json()["timestamps"]
+                # Fetch newly finalized consumption (SMARD)
+                index_url = "https://www.smard.de/app/chart_data/410/DE/index_hour.json"
+                all_timestamps = requests.get(index_url, timeout=30).json()["timestamps"]
 
-            start_ms = int(datetime.strptime(fetch_start, "%Y%m%d").timestamp() * 1000)
-            cutoff_ms = int(cutoff.timestamp() * 1000)
+                start_ms = int(datetime.strptime(fetch_start, "%Y%m%d").timestamp() * 1000)
+                cutoff_ms = int(cutoff.timestamp() * 1000)
 
-            # Only fetch SMARD blocks that might contain our date range
-            for ts in all_timestamps:
-                if datetime.fromtimestamp(ts/1000).year != current_year:
-                    continue
-                block_end = ts + (7 * 24 * 3600 * 1000)  # 7-day blocks
-                if ts > cutoff_ms or block_end < start_ms:
-                    continue
+                # Only fetch SMARD blocks that might contain our date range
+                for ts in all_timestamps:
+                    if datetime.fromtimestamp(ts/1000).year != current_year:
+                        continue
+                    block_end = ts + (7 * 24 * 3600 * 1000)  # 7-day blocks
+                    if ts > cutoff_ms or block_end < start_ms:
+                        continue
 
-                url = f"https://www.smard.de/app/chart_data/410/DE/410_DE_hour_{ts}.json"
+                    url = f"https://www.smard.de/app/chart_data/410/DE/410_DE_hour_{ts}.json"
+                    data = requests.get(url, timeout=30).json()["series"]
+                    for timestamp, value in data:
+                        if start_ms <= timestamp < cutoff_ms and value:
+                            finalized_consumption += value
+
+                time.sleep(5)  # Small delay before next request
+
+                # Fetch last 13 days (rolling window, day after cutoff to today)
+                recent_start = cutoff + timedelta(days=1)
+                recent_start_str = recent_start.strftime("%Y%m%d")
+
+                params["periodStart"] = f"{recent_start_str}0000"
+                params["periodEnd"] = today.strftime("%Y%m%d2359")
+
+                response = requests.get("https://web-api.tp.entsoe.eu/api", params=params, timeout=120)
+                response.raise_for_status()
+                xml_data = ET.fromstring(response.content)
+
+                recent_renewable = 0
+                for series in xml_data.findall(".//ns:TimeSeries", namespace):
+                    energy_type = series.find(".//ns:psrType", namespace)
+                    if energy_type and energy_type.text in renewables:
+                        period = series.find(".//ns:Period", namespace)
+                        if period:
+                            for point in period.findall(".//ns:Point", namespace):
+                                recent_renewable += float(point.find("ns:quantity", namespace).text) * 0.25
+
+                # SMARD consumption for last 13 days
+                latest_ts = requests.get(index_url, timeout=30).json()["timestamps"][-1]
+                url = f"https://www.smard.de/app/chart_data/410/DE/410_DE_hour_{latest_ts}.json"
                 data = requests.get(url, timeout=30).json()["series"]
-                for timestamp, value in data:
-                    if start_ms <= timestamp < cutoff_ms and value:
-                        finalized_consumption += value
 
-            time.sleep(5)  # Small delay before next request
+                recent_start_ms = int(recent_start.timestamp() * 1000)
+                recent_consumption = sum([v for t, v in data if t >= recent_start_ms and v])
 
-            # Fetch last 13 days (rolling window, day after cutoff to today)
-            recent_start = cutoff + timedelta(days=1)
-            recent_start_str = recent_start.strftime("%Y%m%d")
+                # Calculate new average
+                total_renewable = finalized_renewable + recent_renewable
+                total_consumption = finalized_consumption + recent_consumption
+                new_avg = (total_renewable / total_consumption * 100) if total_consumption > 0 else 0
 
-            params["periodStart"] = f"{recent_start_str}0000"
-            params["periodEnd"] = today.strftime("%Y%m%d2359")
+                # Don't save if the result is suspiciously low (API error likely)
+                if new_avg < 10:
+                    st.error("Update failed. Data incomplete.")
+                    st.stop()
 
-            response = requests.get("https://web-api.tp.entsoe.eu/api", params=params, timeout=120)
-            response.raise_for_status()
-            xml_data = ET.fromstring(response.content)
+                # Save updated finalized data
+                with open(YEARLY_AVG_FILE, "w") as f:
+                    json.dump({
+                        "year": current_year,
+                        "renewable_share": new_avg,
+                        "finalized_date": cutoff_str,
+                        "finalized_renewable_MWh": finalized_renewable,
+                        "finalized_consumption_MWh": finalized_consumption
+                    }, f)
 
-            recent_renewable = 0
-            for series in xml_data.findall(".//ns:TimeSeries", namespace):
-                energy_type = series.find(".//ns:psrType", namespace)
-                if energy_type and energy_type.text in renewables:
-                    period = series.find(".//ns:Period", namespace)
-                    if period:
-                        for point in period.findall(".//ns:Point", namespace):
-                            recent_renewable += float(point.find("ns:quantity", namespace).text) * 0.25
-
-            # SMARD consumption for last 13 days
-            latest_ts = requests.get(index_url, timeout=30).json()["timestamps"][-1]
-            url = f"https://www.smard.de/app/chart_data/410/DE/410_DE_hour_{latest_ts}.json"
-            data = requests.get(url, timeout=30).json()["series"]
-
-            recent_start_ms = int(recent_start.timestamp() * 1000)
-            recent_consumption = sum([v for t, v in data if t >= recent_start_ms and v])
-
-            # Calculate new average
-            total_renewable = finalized_renewable + recent_renewable
-            total_consumption = finalized_consumption + recent_consumption
-            new_avg = (total_renewable / total_consumption * 100) if total_consumption > 0 else 0
-
-            # Save updated finalized data
-            with open(YEARLY_AVG_FILE, "w") as f:
-                json.dump({
-                    "year": current_year,
-                    "renewable_share": new_avg,
-                    "finalized_date": cutoff_str,
-                    "finalized_renewable_MWh": finalized_renewable,
-                    "finalized_consumption_MWh": finalized_consumption
-                }, f)
-
-            st.rerun()
+                # Clear today's cache and reload
+                get_entsoe_data.clear()
+                get_smard_data.clear()
+                st.rerun()
+                
+            except Exception as e:
+                st.error(f"Update failed: {str(e)}")
+                st.stop()
     st.markdown('</div>', unsafe_allow_html=True)  # Close tiny-button div
