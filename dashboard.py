@@ -400,55 +400,67 @@ with button_right:
 
                 # Determine what to fetch
                 if last_finalized is None:
-                    # First time: get everything from Jan 1 to cutoff
-                    fetch_start = f"{current_year}0101"
+                    fetch_start_date = datetime(current_year, 1, 1)
                 else:
-                    # Subsequent: only get days after last finalized (no double-counting)
-                    next_day = datetime.strptime(last_finalized, "%Y%m%d") + timedelta(days=1)
-                    fetch_start = next_day.strftime("%Y%m%d")
+                    fetch_start_date = datetime.strptime(last_finalized, "%Y%m%d") + timedelta(days=1)
 
-                # Fetch newly finalized generation (ENTSOE)
+                # API setup
                 api_key = os.getenv("ENTSOE_API_KEY")
                 namespace = {"ns": "urn:iec62325.351:tc57wg16:451-6:generationloaddocument:3:0"}
                 renewables = ["B01", "B09", "B11", "B12", "B15", "B16", "B17", "B18", "B19"]
 
-                params = {
-                    "securityToken": api_key,
-                    "documentType": "A75",
-                    "processType": "A16",
-                    "in_Domain": "10Y1001A1001A83F",
-                    "out_Domain": "10Y1001A1001A83F",
-                    "periodStart": f"{fetch_start}0000",
-                    "periodEnd": f"{cutoff_str}2359",
-                }
+                # Fetch ENTSOE in monthly chunks (much faster and more reliable)
+                current_date = fetch_start_date
+                while current_date <= cutoff:
+                    # Get month boundaries
+                    month_start = current_date
+                    if month_start.month == 12:
+                        month_end = datetime(month_start.year + 1, 1, 1) - timedelta(days=1)
+                    else:
+                        month_end = datetime(month_start.year, month_start.month + 1, 1) - timedelta(days=1)
+                    
+                    # Don't go past cutoff
+                    chunk_end = min(month_end, cutoff)
 
-                response = requests.get("https://web-api.tp.entsoe.eu/api", params=params, timeout=120)
-                response.raise_for_status()
-                xml_data = ET.fromstring(response.content)
+                    params = {
+                        "securityToken": api_key,
+                        "documentType": "A75",
+                        "processType": "A16",
+                        "in_Domain": "10Y1001A1001A83F",
+                        "out_Domain": "10Y1001A1001A83F",
+                        "periodStart": month_start.strftime("%Y%m%d") + "0000",
+                        "periodEnd": chunk_end.strftime("%Y%m%d") + "2359",
+                    }
 
-                new_renewable = 0
-                for series in xml_data.findall(".//ns:TimeSeries", namespace):
-                    energy_type = series.find(".//ns:psrType", namespace)
-                    if energy_type and energy_type.text in renewables:
-                        period = series.find(".//ns:Period", namespace)
-                        if period:
-                            for point in period.findall(".//ns:Point", namespace):
-                                new_renewable += float(point.find("ns:quantity", namespace).text) * 0.25
+                    response = requests.get("https://web-api.tp.entsoe.eu/api", params=params, timeout=60)
+                    response.raise_for_status()
+                    xml_data = ET.fromstring(response.content)
 
-                finalized_renewable += new_renewable
+                    for series in xml_data.findall(".//ns:TimeSeries", namespace):
+                        energy_type = series.find(".//ns:psrType", namespace)
+                        if energy_type and energy_type.text in renewables:
+                            period = series.find(".//ns:Period", namespace)
+                            if period:
+                                for point in period.findall(".//ns:Point", namespace):
+                                    finalized_renewable += float(point.find("ns:quantity", namespace).text) * 0.25
 
-                # Fetch newly finalized consumption (SMARD)
+                    # Move to next month
+                    if month_start.month == 12:
+                        current_date = datetime(month_start.year + 1, 1, 1)
+                    else:
+                        current_date = datetime(month_start.year, month_start.month + 1, 1)
+
+                # Fetch SMARD consumption (all at once - it's fast)
                 index_url = "https://www.smard.de/app/chart_data/410/DE/index_hour.json"
                 all_timestamps = requests.get(index_url, timeout=30).json()["timestamps"]
 
-                start_ms = int(datetime.strptime(fetch_start, "%Y%m%d").timestamp() * 1000)
+                start_ms = int(fetch_start_date.timestamp() * 1000)
                 cutoff_ms = int(cutoff.timestamp() * 1000)
 
-                # Only fetch SMARD blocks that might contain our date range
                 for ts in all_timestamps:
                     if datetime.fromtimestamp(ts/1000).year != current_year:
                         continue
-                    block_end = ts + (7 * 24 * 3600 * 1000)  # 7-day blocks
+                    block_end = ts + (7 * 24 * 3600 * 1000)
                     if ts > cutoff_ms or block_end < start_ms:
                         continue
 
@@ -457,8 +469,6 @@ with button_right:
                     for timestamp, value in data:
                         if start_ms <= timestamp < cutoff_ms and value:
                             finalized_consumption += value
-
-                time.sleep(5)  # Small delay before next request
 
                 # Fetch last 13 days (rolling window, day after cutoff to today)
                 recent_start = cutoff + timedelta(days=1)
@@ -512,7 +522,7 @@ with button_right:
                 get_entsoe_data.clear()
                 get_smard_data.clear()
                 st.rerun()
-                
+
             except Exception as e:
                 st.error(f"Update failed: {str(e)}")
                 st.stop()
