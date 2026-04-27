@@ -352,7 +352,7 @@ with divider2:
 
 # Show last available data timestamp
 last_data_str = last_data_time.strftime("%H:%M, %B %d, %Y")
-st.markdown(f"<p style='text-align: center; margin-bottom: 5px;'><i>🕒 Last available data: {last_data_str}</i></p>",
+st.markdown(f"<p style='text-align: center; margin-bottom: 5px;'><i>🕒 Last fully available data: {last_data_str}</i></p>",
             unsafe_allow_html=True)
 
 # Sources and update button
